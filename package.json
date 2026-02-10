@@ -1,0 +1,19 @@
+{
+  "name": "voice-expense-manager",
+  "version": "1.0.0",
+  "description": "AI agent that tracks daily expenses via Telegram voice notes → Google Sheets",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "keywords": ["telegram", "bot", "expense", "voice", "whisper", "google-sheets"],
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "googleapis": "^144.0.0",
+    "grammy": "^1.35.0",
+    "openai": "^4.82.0"
+  }
+}
