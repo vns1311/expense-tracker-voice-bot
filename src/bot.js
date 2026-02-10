@@ -4,6 +4,7 @@ import config from "./config.js";
 import { transcribeVoice } from "./transcribe.js";
 import { extractExpense } from "./extract.js";
 import { appendExpense } from "./sheets.js";
+import { buildSummary } from "./summary.js";
 
 const bot = new Bot(config.telegramBotToken);
 
@@ -44,9 +45,47 @@ bot.command("help", async (ctx) => {
         `Food · Transport · Shopping · Bills · Entertainment · Health · Education · Travel · Groceries · Other\n\n` +
         `🔹 *Commands*\n` +
         `/start — Welcome message\n` +
+        `/week — This week's spending summary\n` +
+        `/month — This month's spending summary\n` +
         `/help — This message`,
         { parse_mode: "Markdown" }
     );
+});
+
+// ── /week command ───────────────────────────────────────────────────
+bot.command("week", async (ctx) => {
+    const msg = await ctx.reply("📊 Crunching this week's numbers...");
+    try {
+        const summary = await buildSummary("week");
+        await ctx.api.editMessageText(ctx.chat.id, msg.message_id, summary, {
+            parse_mode: "Markdown",
+        });
+    } catch (err) {
+        console.error("Error building weekly summary:", err);
+        await ctx.api.editMessageText(
+            ctx.chat.id,
+            msg.message_id,
+            "❌ Failed to generate summary. Please try again."
+        );
+    }
+});
+
+// ── /month command ──────────────────────────────────────────────────
+bot.command("month", async (ctx) => {
+    const msg = await ctx.reply("📊 Crunching this month's numbers...");
+    try {
+        const summary = await buildSummary("month");
+        await ctx.api.editMessageText(ctx.chat.id, msg.message_id, summary, {
+            parse_mode: "Markdown",
+        });
+    } catch (err) {
+        console.error("Error building monthly summary:", err);
+        await ctx.api.editMessageText(
+            ctx.chat.id,
+            msg.message_id,
+            "❌ Failed to generate summary. Please try again."
+        );
+    }
 });
 
 // ── Voice message handler ───────────────────────────────────────────

@@ -8,12 +8,20 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js"
   },
-  "keywords": ["telegram", "bot", "expense", "voice", "whisper", "google-sheets"],
+  "keywords": [
+    "telegram",
+    "bot",
+    "expense",
+    "voice",
+    "whisper",
+    "google-sheets"
+  ],
   "license": "MIT",
   "dependencies": {
     "dotenv": "^16.4.7",
     "googleapis": "^144.0.0",
     "grammy": "^1.35.0",
+    "node-cron": "^4.2.1",
     "openai": "^4.82.0"
   }
 }

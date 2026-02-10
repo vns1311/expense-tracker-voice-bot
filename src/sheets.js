@@ -61,3 +61,24 @@ export async function appendExpense(expense) {
         requestBody: { values: [row] },
     });
 }
+
+// ── Read all expense rows ───────────────────────────────────────────
+/**
+ * @returns {Promise<Array<{ date: string, amount: number, currency: string, category: string, description: string, rawTranscript: string }>>}
+ */
+export async function getExpenses() {
+    const res = await sheets.spreadsheets.values.get({
+        spreadsheetId: SHEET_ID,
+        range: `${SHEET_NAME}!A2:F`, // skip header row
+    });
+
+    const rows = res.data.values || [];
+    return rows.map((row) => ({
+        date: row[0] || "",
+        amount: parseFloat(row[1]) || 0,
+        currency: row[2] || "INR",
+        category: row[3] || "Other",
+        description: row[4] || "",
+        rawTranscript: row[5] || "",
+    }));
+}

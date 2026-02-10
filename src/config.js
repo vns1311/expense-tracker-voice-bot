@@ -42,6 +42,9 @@ const config = Object.freeze({
     openaiApiKey: process.env.OPENAI_API_KEY,
     googleCredentials,
     googleSheetId: process.env.GOOGLE_SHEET_ID,
+    highValueThreshold: Number(process.env.HIGH_VALUE_THRESHOLD) || 500,
+    telegramChatId: process.env.TELEGRAM_CHAT_ID || "",
+    timezone: process.env.TIMEZONE || "Asia/Kolkata",
 });
 
 export default config;
