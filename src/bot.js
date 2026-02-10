@@ -2,7 +2,7 @@ import { Bot } from "grammy";
 import { writeFile, unlink } from "fs/promises";
 import config from "./config.js";
 import { transcribeVoice } from "./transcribe.js";
-import { extractExpense } from "./extract.js";
+import { extractExpense, extractExpenseFromImage } from "./extract.js";
 import { appendExpense, deleteLastExpense } from "./sheets.js";
 import { buildSummary } from "./summary.js";
 
@@ -23,11 +23,11 @@ function currencyDisplay(code, amount) {
 bot.command("start", async (ctx) => {
     await ctx.reply(
         `👋 *Welcome to Expense Tracker!*\n\n` +
-        `Just send me a *voice note* describing your expense and I'll log it to your Google Sheet.\n\n` +
+        `Just send me a *voice note*, *text message*, or *receipt photo* and I'll log it to your Google Sheet.\n\n` +
         `💡 *Examples:*\n` +
         `🎤 _"Spent 200 rupees on lunch"_\n` +
-        `🎤 _"Uber ride to office, 150 rupees"_\n` +
-        `🎤 _"Bought groceries for 500"_\n\n` +
+        `💬 _"coffee 150"_\n` +
+        `📸 _Send a photo of your receipt_\n\n` +
         `I understand *any language* — Hindi, Tamil, English, you name it!\n\n` +
         `Type /help for more info.`,
         { parse_mode: "Markdown" }
@@ -38,7 +38,7 @@ bot.command("start", async (ctx) => {
 bot.command("help", async (ctx) => {
     await ctx.reply(
         `🔹 *How to use*\n` +
-        `Record a voice note mentioning the amount and what you spent on.\n\n` +
+        `Send a voice note, text message, or receipt photo.\n\n` +
         `🔹 *Supported languages*\n` +
         `Any language — Whisper auto-detects.\n\n` +
         `🔹 *Categories*\n` +
@@ -174,6 +174,53 @@ bot.on("message:voice", async (ctx) => {
             ctx.chat.id,
             processingMsg.message_id,
             `❌ *Sorry, something went wrong.*\n\nPlease try again. If the issue persists, check the server logs.`,
+            { parse_mode: "Markdown" }
+        );
+    }
+});
+
+// ── Photo message handler (receipt scanning) ────────────────────────
+bot.on("message:photo", async (ctx) => {
+    const processingMsg = await ctx.reply("📸 Scanning your receipt...");
+
+    try {
+        // Telegram sends multiple sizes — grab the largest
+        const photos = ctx.message.photo;
+        const largest = photos[photos.length - 1];
+        const file = await ctx.api.getFile(largest.file_id);
+        const imageUrl = `https://api.telegram.org/file/bot${config.telegramBotToken}/${file.file_path}`;
+
+        // Extract expense from receipt image
+        const expense = await extractExpenseFromImage(imageUrl);
+
+        // Log to Google Sheet
+        const today = new Date().toISOString().split("T")[0];
+        await appendExpense({
+            date: today,
+            amount: expense.amount,
+            currency: expense.currency,
+            category: expense.category,
+            description: expense.description,
+            rawTranscript: "[receipt photo]",
+        });
+
+        // Reply with confirmation
+        await ctx.api.editMessageText(
+            ctx.chat.id,
+            processingMsg.message_id,
+            `✅ *Receipt Logged!*\n\n` +
+            `💰 *Amount:* ${currencyDisplay(expense.currency, expense.amount)}\n` +
+            `📂 *Category:* ${expense.category}\n` +
+            `📝 *Description:* ${expense.description}\n` +
+            `🗓 *Date:* ${today}`,
+            { parse_mode: "Markdown" }
+        );
+    } catch (err) {
+        console.error("Error processing receipt photo:", err);
+        await ctx.api.editMessageText(
+            ctx.chat.id,
+            processingMsg.message_id,
+            `❌ *Couldn't read this receipt.*\n\nMake sure the photo is clear and well-lit. Try again!`,
             { parse_mode: "Markdown" }
         );
     }
