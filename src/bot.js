@@ -3,7 +3,7 @@ import { writeFile, unlink } from "fs/promises";
 import config from "./config.js";
 import { transcribeVoice } from "./transcribe.js";
 import { extractExpense } from "./extract.js";
-import { appendExpense } from "./sheets.js";
+import { appendExpense, deleteLastExpense } from "./sheets.js";
 import { buildSummary } from "./summary.js";
 
 const bot = new Bot(config.telegramBotToken);
@@ -47,9 +47,43 @@ bot.command("help", async (ctx) => {
         `/start — Welcome message\n` +
         `/week — This week's spending summary\n` +
         `/month — This month's spending summary\n` +
+        `/undo — Delete the last logged expense\n` +
         `/help — This message`,
         { parse_mode: "Markdown" }
     );
+});
+
+// ── /undo command ───────────────────────────────────────────────────
+bot.command("undo", async (ctx) => {
+    const msg = await ctx.reply("🗑 Removing last expense...");
+    try {
+        const deleted = await deleteLastExpense();
+        if (!deleted) {
+            await ctx.api.editMessageText(
+                ctx.chat.id,
+                msg.message_id,
+                "📭 No expenses to undo — the sheet is empty."
+            );
+            return;
+        }
+        await ctx.api.editMessageText(
+            ctx.chat.id,
+            msg.message_id,
+            `🗑 *Expense Deleted!*\n\n` +
+            `💰 *Amount:* ${currencyDisplay(deleted.currency, deleted.amount)}\n` +
+            `📂 *Category:* ${deleted.category}\n` +
+            `📝 *Description:* ${deleted.description}\n` +
+            `🗓 *Date:* ${deleted.date}`,
+            { parse_mode: "Markdown" }
+        );
+    } catch (err) {
+        console.error("Error undoing expense:", err);
+        await ctx.api.editMessageText(
+            ctx.chat.id,
+            msg.message_id,
+            "❌ Failed to undo. Please try again."
+        );
+    }
 });
 
 // ── /week command ───────────────────────────────────────────────────

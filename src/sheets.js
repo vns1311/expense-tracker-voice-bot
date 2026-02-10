@@ -82,3 +82,59 @@ export async function getExpenses() {
         rawTranscript: row[5] || "",
     }));
 }
+
+// ── Delete the last expense row ─────────────────────────────────────
+/**
+ * Deletes the last data row from the sheet.
+ * @returns {Promise<{ date: string, amount: number, currency: string, category: string, description: string } | null>}
+ */
+export async function deleteLastExpense() {
+    // 1. Get all rows to find the last one
+    const res = await sheets.spreadsheets.values.get({
+        spreadsheetId: SHEET_ID,
+        range: `${SHEET_NAME}!A2:F`,
+    });
+
+    const rows = res.data.values || [];
+    if (rows.length === 0) return null;
+
+    const lastRow = rows[rows.length - 1];
+    const lastRowIndex = rows.length + 1; // +1 for header row (1-indexed)
+
+    // 2. Get the numeric sheet (tab) ID
+    const meta = await sheets.spreadsheets.get({
+        spreadsheetId: SHEET_ID,
+        fields: "sheets.properties",
+    });
+    const sheetTab = meta.data.sheets.find(
+        (s) => s.properties.title === SHEET_NAME
+    );
+    const sheetGid = sheetTab.properties.sheetId;
+
+    // 3. Delete the row
+    await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        requestBody: {
+            requests: [
+                {
+                    deleteDimension: {
+                        range: {
+                            sheetId: sheetGid,
+                            dimension: "ROWS",
+                            startIndex: lastRowIndex - 1, // 0-indexed
+                            endIndex: lastRowIndex,
+                        },
+                    },
+                },
+            ],
+        },
+    });
+
+    return {
+        date: lastRow[0] || "",
+        amount: parseFloat(lastRow[1]) || 0,
+        currency: lastRow[2] || "INR",
+        category: lastRow[3] || "Other",
+        description: lastRow[4] || "",
+    };
+}
