@@ -179,16 +179,50 @@ bot.on("message:voice", async (ctx) => {
     }
 });
 
-// ── Handle text messages (nudge towards voice) ──────────────────────
+// ── Handle text messages (extract expense from text) ────────────────
 bot.on("message:text", async (ctx) => {
     // Ignore commands (already handled above)
     if (ctx.message.text.startsWith("/")) return;
 
-    await ctx.reply(
-        `🎤 I work best with *voice notes!*\n\n` +
-        `Just hold the mic button and describe your expense — I'll handle the rest.`,
-        { parse_mode: "Markdown" }
-    );
+    const processingMsg = await ctx.reply("💬 Processing your message...");
+
+    try {
+        const text = ctx.message.text;
+
+        // Extract expense data from the text
+        const expense = await extractExpense(text);
+
+        // Log to Google Sheet
+        const today = new Date().toISOString().split("T")[0];
+        await appendExpense({
+            date: today,
+            amount: expense.amount,
+            currency: expense.currency,
+            category: expense.category,
+            description: expense.description,
+            rawTranscript: text,
+        });
+
+        // Reply with confirmation
+        await ctx.api.editMessageText(
+            ctx.chat.id,
+            processingMsg.message_id,
+            `✅ *Expense Logged!*\n\n` +
+            `💰 *Amount:* ${currencyDisplay(expense.currency, expense.amount)}\n` +
+            `📂 *Category:* ${expense.category}\n` +
+            `📝 *Description:* ${expense.description}\n` +
+            `🗓 *Date:* ${today}`,
+            { parse_mode: "Markdown" }
+        );
+    } catch (err) {
+        console.error("Error processing text message:", err);
+        await ctx.api.editMessageText(
+            ctx.chat.id,
+            processingMsg.message_id,
+            `❌ *Couldn't parse that.*\n\nTry something like: _"coffee 150"_ or _"Uber ride 300 rupees"_`,
+            { parse_mode: "Markdown" }
+        );
+    }
 });
 
 export default bot;
