@@ -143,9 +143,9 @@ bot.on("message:voice", async (ctx) => {
         const expense = await extractExpense(transcript);
 
         // 4. Log to Google Sheet
-        const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
+        const expenseDate = expense.date || new Date().toISOString().split("T")[0];
         await appendExpense({
-            date: today,
+            date: expenseDate,
             amount: expense.amount,
             currency: expense.currency,
             category: expense.category,
@@ -161,7 +161,7 @@ bot.on("message:voice", async (ctx) => {
             `💰 *Amount:* ${currencyDisplay(expense.currency, expense.amount)}\n` +
             `📂 *Category:* ${expense.category}\n` +
             `📝 *Description:* ${expense.description}\n` +
-            `🗓 *Date:* ${today}\n\n` +
+            `🗓 *Date:* ${expenseDate}\n\n` +
             `🎙 _"${transcript}"_`,
             { parse_mode: "Markdown" }
         );
@@ -194,9 +194,9 @@ bot.on("message:photo", async (ctx) => {
         const expense = await extractExpenseFromImage(imageUrl);
 
         // Log to Google Sheet
-        const today = new Date().toISOString().split("T")[0];
+        const expenseDate = expense.date || new Date().toISOString().split("T")[0];
         await appendExpense({
-            date: today,
+            date: expenseDate,
             amount: expense.amount,
             currency: expense.currency,
             category: expense.category,
@@ -212,7 +212,7 @@ bot.on("message:photo", async (ctx) => {
             `💰 *Amount:* ${currencyDisplay(expense.currency, expense.amount)}\n` +
             `📂 *Category:* ${expense.category}\n` +
             `📝 *Description:* ${expense.description}\n` +
-            `🗓 *Date:* ${today}`,
+            `🗓 *Date:* ${expenseDate}`,
             { parse_mode: "Markdown" }
         );
     } catch (err) {
@@ -240,9 +240,9 @@ bot.on("message:text", async (ctx) => {
         const expense = await extractExpense(text);
 
         // Log to Google Sheet
-        const today = new Date().toISOString().split("T")[0];
+        const expenseDate = expense.date || new Date().toISOString().split("T")[0];
         await appendExpense({
-            date: today,
+            date: expenseDate,
             amount: expense.amount,
             currency: expense.currency,
             category: expense.category,
@@ -258,7 +258,7 @@ bot.on("message:text", async (ctx) => {
             `💰 *Amount:* ${currencyDisplay(expense.currency, expense.amount)}\n` +
             `📂 *Category:* ${expense.category}\n` +
             `📝 *Description:* ${expense.description}\n` +
-            `🗓 *Date:* ${today}`,
+            `🗓 *Date:* ${expenseDate}`,
             { parse_mode: "Markdown" }
         );
     } catch (err) {
