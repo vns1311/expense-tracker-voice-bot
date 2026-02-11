@@ -2,13 +2,17 @@ import { Bot, InputFile } from "grammy";
 import { writeFile, unlink } from "fs/promises";
 import config from "./config.js";
 import { transcribeVoice } from "./transcribe.js";
-import { extractExpense, extractExpenseFromImage } from "./extract.js";
+import { extractExpense, extractExpenseFromImage, needsClarification, clarifyExpense } from "./extract.js";
 import { appendExpense, deleteLastExpense, getCategories, addCategory, removeCategory, getBudgets, setBudget, removeBudget, getMonthlySpendByCategory } from "./sheets.js";
 import { buildSummary } from "./summary.js";
 import { convertToINR } from "./currency.js";
 import { generatePieChart } from "./chart.js";
 
 const bot = new Bot(config.telegramBotToken);
+
+// ── Pending conversations (chatId → partial expense data) ───────────
+const pendingConversations = new Map();
+const PENDING_TIMEOUT_MS = 5 * 60 * 1000; // 5 min expiry
 
 // ── Currency symbols for pretty display ─────────────────────────────
 const CURRENCY_SYMBOLS = {
@@ -86,6 +90,39 @@ async function buildExpensePayload(expense, rawTranscript) {
     };
 
     return { sheetData, inrAmount, expenseDate, conversionNote };
+}
+
+/**
+ * Build a friendly clarifying question for missing fields.
+ */
+function buildClarifyQuestion(expense, missingFields, originalInput) {
+    const parts = [];
+    const desc = expense.description || originalInput;
+
+    if (missingFields.includes("amount")) {
+        parts.push(`How much did you spend?`);
+    }
+    if (missingFields.includes("description")) {
+        parts.push(`What was the purchase?`);
+    }
+
+    return (
+        `🤔 I got: _"${desc}"_\n\n` +
+        parts.map((q) => `❓ ${q}`).join("\n") +
+        `\n\nJust reply with the missing info and I'll log it!`
+    );
+}
+
+/**
+ * Store a pending conversation and set auto-expiry.
+ */
+function setPending(chatId, data) {
+    pendingConversations.set(chatId, data);
+    setTimeout(() => {
+        if (pendingConversations.has(chatId)) {
+            pendingConversations.delete(chatId);
+        }
+    }, PENDING_TIMEOUT_MS);
 }
 
 // ── /start command ──────────────────────────────────────────────────
@@ -408,6 +445,24 @@ bot.on("message:voice", async (ctx) => {
         // 3. Extract expense data
         const expense = await extractExpense(transcript);
 
+        // 3a. Check for ambiguity
+        const { needed, missingFields } = needsClarification(expense);
+        if (needed) {
+            setPending(ctx.chat.id, {
+                partialExpense: expense,
+                originalInput: transcript,
+                source: "voice",
+            });
+            await ctx.api.editMessageText(
+                ctx.chat.id,
+                processingMsg.message_id,
+                buildClarifyQuestion(expense, missingFields, transcript),
+                { parse_mode: "Markdown" }
+            );
+            await unlink(filePath).catch(() => { });
+            return;
+        }
+
         // 4. Convert to INR if needed & log to Google Sheet
         const { sheetData, inrAmount, expenseDate, conversionNote } = await buildExpensePayload(expense, transcript);
         await appendExpense(sheetData);
@@ -489,13 +544,73 @@ bot.on("message:text", async (ctx) => {
     // Ignore commands (already handled above)
     if (ctx.message.text.startsWith("/")) return;
 
+    const text = ctx.message.text;
+    const chatId = ctx.chat.id;
+
+    // ── Check if this is a follow-up to a pending conversation ──
+    if (pendingConversations.has(chatId)) {
+        const pending = pendingConversations.get(chatId);
+        pendingConversations.delete(chatId);
+
+        const processingMsg = await ctx.reply("💬 Got it, completing your expense...");
+
+        try {
+            const expense = await clarifyExpense(
+                pending.partialExpense, pending.originalInput, text
+            );
+
+            const { sheetData, inrAmount, expenseDate, conversionNote } = await buildExpensePayload(
+                expense, `${pending.originalInput} → ${text}`
+            );
+            await appendExpense(sheetData);
+
+            await ctx.api.editMessageText(
+                chatId,
+                processingMsg.message_id,
+                `✅ *Expense Logged!*\n\n` +
+                `💰 *Amount:* ₹${inrAmount}\n` +
+                `📂 *Category:* ${expense.category}\n` +
+                `📝 *Description:* ${expense.description}\n` +
+                `🗓 *Date:* ${expenseDate}${conversionNote}`,
+                { parse_mode: "Markdown" }
+            );
+
+            await checkBudgetAlert(ctx, expense.category, "INR");
+        } catch (err) {
+            console.error("Error processing follow-up:", err);
+            await ctx.api.editMessageText(
+                chatId,
+                processingMsg.message_id,
+                `❌ *Still couldn't parse that.*\n\nTry entering the full expense: _"coffee 150"_`,
+                { parse_mode: "Markdown" }
+            );
+        }
+        return;
+    }
+
+    // ── Normal text expense extraction ──
     const processingMsg = await ctx.reply("💬 Processing your message...");
 
     try {
-        const text = ctx.message.text;
-
         // Extract expense data from the text
         const expense = await extractExpense(text);
+
+        // Check for ambiguity
+        const { needed, missingFields } = needsClarification(expense);
+        if (needed) {
+            setPending(chatId, {
+                partialExpense: expense,
+                originalInput: text,
+                source: "text",
+            });
+            await ctx.api.editMessageText(
+                chatId,
+                processingMsg.message_id,
+                buildClarifyQuestion(expense, missingFields, text),
+                { parse_mode: "Markdown" }
+            );
+            return;
+        }
 
         // Convert to INR if needed & log to Google Sheet
         const { sheetData, inrAmount, expenseDate, conversionNote } = await buildExpensePayload(expense, text);
@@ -503,7 +618,7 @@ bot.on("message:text", async (ctx) => {
 
         // Reply with confirmation
         await ctx.api.editMessageText(
-            ctx.chat.id,
+            chatId,
             processingMsg.message_id,
             `✅ *Expense Logged!*\n\n` +
             `💰 *Amount:* ₹${inrAmount}\n` +
@@ -518,7 +633,7 @@ bot.on("message:text", async (ctx) => {
     } catch (err) {
         console.error("Error processing text message:", err);
         await ctx.api.editMessageText(
-            ctx.chat.id,
+            chatId,
             processingMsg.message_id,
             `❌ *Couldn't parse that.*\n\nTry something like: _"coffee 150"_ or _"Uber ride 300 rupees"_`,
             { parse_mode: "Markdown" }

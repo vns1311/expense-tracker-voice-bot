@@ -9,16 +9,16 @@ const SYSTEM_PROMPT_BASE = `You are an expense extraction assistant.
 Given a transcript of a voice note or text message about a personal expense, extract the following fields and respond ONLY with a JSON object:
 
 {
-  "amount": <number>,
+  "amount": <number or null>,
   "currency": "<3-letter ISO code, e.g. INR, USD, EUR>",
-  "category": "<one of the categories below>",
+  "category": "<one of the categories below or null>",
   "description": "<short 2-5 word summary of what was purchased>",
   "date": "<YYYY-MM-DD>"
 }
 
 Rules:
 - If the currency is not mentioned, default to INR.
-- If the amount is ambiguous, make your best guess.
+- If the amount is NOT mentioned or cannot be reasonably inferred, set amount to null. Do NOT guess a random amount.
 - If the category is unclear, use "Other".
 - The description should be concise — e.g. "lunch at restaurant", "Uber ride", "electricity bill".
 - For the date, resolve relative expressions ("yesterday", "last Friday", "day before yesterday", "last week Monday") to an actual YYYY-MM-DD date using TODAY'S DATE provided below.
@@ -49,6 +49,54 @@ export async function extractExpense(transcript) {
         messages: [
             { role: "system", content: systemPrompt },
             { role: "user", content: transcript },
+        ],
+        temperature: 0.1,
+        max_tokens: 200,
+    });
+
+    const raw = response.choices[0].message.content;
+    return JSON.parse(raw);
+}
+
+/**
+ * Check if the extracted expense needs clarification.
+ * @param {object} expense
+ * @returns {{ needed: boolean, missingFields: string[] }}
+ */
+export function needsClarification(expense) {
+    const missing = [];
+    if (expense.amount == null) missing.push("amount");
+    if (!expense.description || expense.description.toLowerCase() === "unknown") missing.push("description");
+    return { needed: missing.length > 0, missingFields: missing };
+}
+
+/**
+ * Complete an ambiguous expense extraction using the original input + the user's follow-up reply.
+ *
+ * @param {object} partialExpense - The incomplete expense data
+ * @param {string} originalInput - The original user message
+ * @param {string} followUp - The user's clarification reply
+ * @returns {Promise<object>} completed expense
+ */
+export async function clarifyExpense(partialExpense, originalInput, followUp) {
+    const systemPrompt = await buildSystemPrompt();
+    const clarifyPrompt = `${systemPrompt}
+
+You previously extracted partial data from a user's expense message but some fields were missing.
+Here is what you have so far:
+${JSON.stringify(partialExpense, null, 2)}
+
+The user's original message was: "${originalInput}"
+The user has now replied with additional information: "${followUp}"
+
+Using the original message AND the follow-up, fill in ALL the fields. Return a complete JSON object with no null values. If the amount is still unclear, make your best guess based on context.`;
+
+    const response = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        response_format: { type: "json_object" },
+        messages: [
+            { role: "system", content: clarifyPrompt },
+            { role: "user", content: followUp },
         ],
         temperature: 0.1,
         max_tokens: 200,
