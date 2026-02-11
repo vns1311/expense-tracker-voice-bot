@@ -3,7 +3,7 @@ import { writeFile, unlink } from "fs/promises";
 import config from "./config.js";
 import { transcribeVoice } from "./transcribe.js";
 import { extractExpense, extractExpenseFromImage } from "./extract.js";
-import { appendExpense, deleteLastExpense } from "./sheets.js";
+import { appendExpense, deleteLastExpense, getCategories, addCategory, removeCategory } from "./sheets.js";
 import { buildSummary } from "./summary.js";
 
 const bot = new Bot(config.telegramBotToken);
@@ -42,12 +42,13 @@ bot.command("help", async (ctx) => {
         `🔹 *Supported languages*\n` +
         `Any language — Whisper auto-detects.\n\n` +
         `🔹 *Categories*\n` +
-        `Food · Transport · Shopping · Bills · Entertainment · Health · Education · Travel · Groceries · Other\n\n` +
+        `Food · Transport · Shopping · Bills · Entertainment · Health · Education · Travel · Groceries · Other + your custom ones\n\n` +
         `🔹 *Commands*\n` +
         `/start — Welcome message\n` +
         `/week — This week's spending summary\n` +
         `/month — This month's spending summary\n` +
         `/undo — Delete the last logged expense\n` +
+        `/categories — View, add, or remove categories\n` +
         `/help — This message`,
         { parse_mode: "Markdown" }
     );
@@ -83,6 +84,65 @@ bot.command("undo", async (ctx) => {
             msg.message_id,
             "❌ Failed to undo. Please try again."
         );
+    }
+});
+
+// ── /categories command ─────────────────────────────────────────────
+bot.command("categories", async (ctx) => {
+    const args = ctx.match?.trim() || "";
+
+    try {
+        // /categories add <name>
+        if (args.toLowerCase().startsWith("add ")) {
+            const name = args.slice(4).trim();
+            if (!name) {
+                await ctx.reply("⚠️ Usage: `/categories add Subscriptions`", { parse_mode: "Markdown" });
+                return;
+            }
+            const added = await addCategory(name);
+            if (added) {
+                await ctx.reply(`✅ Category *${name}* added!`, { parse_mode: "Markdown" });
+            } else {
+                await ctx.reply(`⚠️ *${name}* already exists.`, { parse_mode: "Markdown" });
+            }
+            return;
+        }
+
+        // /categories remove <name>
+        if (args.toLowerCase().startsWith("remove ")) {
+            const name = args.slice(7).trim();
+            if (!name) {
+                await ctx.reply("⚠️ Usage: `/categories remove Subscriptions`", { parse_mode: "Markdown" });
+                return;
+            }
+            const removed = await removeCategory(name);
+            if (removed) {
+                await ctx.reply(`🗑 Category *${name}* removed.`, { parse_mode: "Markdown" });
+            } else {
+                await ctx.reply(`⚠️ *${name}* is either a default category or doesn't exist.`, { parse_mode: "Markdown" });
+            }
+            return;
+        }
+
+        // /categories (list all)
+        const { defaults, custom } = await getCategories();
+        let msg = `🏷 *Your Categories*\n\n`;
+        msg += `🔹 *Defaults:*\n${defaults.map((c) => `• ${c}`).join("\n")}\n\n`;
+
+        if (custom.length > 0) {
+            msg += `✨ *Custom:*\n${custom.map((c) => `• ${c}`).join("\n")}\n\n`;
+        } else {
+            msg += `_No custom categories yet._\n\n`;
+        }
+
+        msg += `💡 *Manage:*\n` +
+            `\`/categories add Subscriptions\`\n` +
+            `\`/categories remove Subscriptions\``;
+
+        await ctx.reply(msg, { parse_mode: "Markdown" });
+    } catch (err) {
+        console.error("Error managing categories:", err);
+        await ctx.reply("❌ Failed to manage categories. Please try again.");
     }
 });
 

@@ -10,6 +10,7 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: "v4", auth });
 const SHEET_ID = config.googleSheetId;
 const SHEET_NAME = "Expenses"; // tab name inside the spreadsheet
+const CATEGORIES_SHEET_NAME = "Categories"; // tab for custom categories
 
 // ── Ensure header row exists ────────────────────────────────────────
 let headerChecked = false;
@@ -138,3 +139,122 @@ export async function deleteLastExpense() {
         description: lastRow[4] || "",
     };
 }
+
+// ── Custom Categories ───────────────────────────────────────────────
+const DEFAULT_CATEGORIES = [
+    "Food", "Transport", "Shopping", "Bills", "Entertainment",
+    "Health", "Education", "Travel", "Groceries", "Other",
+];
+
+async function ensureCategoriesTab() {
+    const meta = await sheets.spreadsheets.get({
+        spreadsheetId: SHEET_ID,
+        fields: "sheets.properties.title",
+    });
+    const exists = meta.data.sheets.some(
+        (s) => s.properties.title === CATEGORIES_SHEET_NAME
+    );
+    if (!exists) {
+        await sheets.spreadsheets.batchUpdate({
+            spreadsheetId: SHEET_ID,
+            requestBody: {
+                requests: [{ addSheet: { properties: { title: CATEGORIES_SHEET_NAME } } }],
+            },
+        });
+        await sheets.spreadsheets.values.update({
+            spreadsheetId: SHEET_ID,
+            range: `${CATEGORIES_SHEET_NAME}!A1:B1`,
+            valueInputOption: "RAW",
+            requestBody: { values: [["Category", "Added On"]] },
+        });
+    }
+}
+
+/**
+ * Get all categories (defaults + custom).
+ * @returns {Promise<{ all: string[], custom: string[], defaults: string[] }>}
+ */
+export async function getCategories() {
+    await ensureCategoriesTab();
+    const res = await sheets.spreadsheets.values.get({
+        spreadsheetId: SHEET_ID,
+        range: `${CATEGORIES_SHEET_NAME}!A2:A`,
+    });
+    const custom = (res.data.values || []).map((r) => r[0]).filter(Boolean);
+    return {
+        defaults: DEFAULT_CATEGORIES,
+        custom,
+        all: [...DEFAULT_CATEGORIES, ...custom],
+    };
+}
+
+/**
+ * Add a custom category.
+ * @param {string} name
+ * @returns {Promise<boolean>} true if added, false if already exists
+ */
+export async function addCategory(name) {
+    const { all } = await getCategories();
+    if (all.some((c) => c.toLowerCase() === name.toLowerCase())) return false;
+
+    const today = new Date().toISOString().split("T")[0];
+    await sheets.spreadsheets.values.append({
+        spreadsheetId: SHEET_ID,
+        range: `${CATEGORIES_SHEET_NAME}!A:B`,
+        valueInputOption: "USER_ENTERED",
+        insertDataOption: "INSERT_ROWS",
+        requestBody: { values: [[name, today]] },
+    });
+    return true;
+}
+
+/**
+ * Remove a custom category.
+ * @param {string} name
+ * @returns {Promise<boolean>} true if removed, false if not found or is a default
+ */
+export async function removeCategory(name) {
+    if (DEFAULT_CATEGORIES.some((c) => c.toLowerCase() === name.toLowerCase())) {
+        return false; // can't remove defaults
+    }
+
+    await ensureCategoriesTab();
+    const res = await sheets.spreadsheets.values.get({
+        spreadsheetId: SHEET_ID,
+        range: `${CATEGORIES_SHEET_NAME}!A2:A`,
+    });
+    const rows = res.data.values || [];
+    const idx = rows.findIndex(
+        (r) => r[0] && r[0].toLowerCase() === name.toLowerCase()
+    );
+    if (idx === -1) return false;
+
+    const rowIndex = idx + 2; // +1 header, +1 zero-index
+
+    // Get sheet GID
+    const meta = await sheets.spreadsheets.get({
+        spreadsheetId: SHEET_ID,
+        fields: "sheets.properties",
+    });
+    const tab = meta.data.sheets.find(
+        (s) => s.properties.title === CATEGORIES_SHEET_NAME
+    );
+
+    await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        requestBody: {
+            requests: [{
+                deleteDimension: {
+                    range: {
+                        sheetId: tab.properties.sheetId,
+                        dimension: "ROWS",
+                        startIndex: rowIndex - 1,
+                        endIndex: rowIndex,
+                    },
+                },
+            }],
+        },
+    });
+    return true;
+}
+
