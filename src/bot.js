@@ -3,8 +3,9 @@ import { writeFile, unlink } from "fs/promises";
 import config from "./config.js";
 import { transcribeVoice } from "./transcribe.js";
 import { extractExpense, extractExpenseFromImage } from "./extract.js";
-import { appendExpense, deleteLastExpense, getCategories, addCategory, removeCategory } from "./sheets.js";
+import { appendExpense, deleteLastExpense, getCategories, addCategory, removeCategory, getBudgets, setBudget, removeBudget, getMonthlySpendByCategory } from "./sheets.js";
 import { buildSummary } from "./summary.js";
+import { convertToINR } from "./currency.js";
 
 const bot = new Bot(config.telegramBotToken);
 
@@ -17,6 +18,73 @@ const CURRENCY_SYMBOLS = {
 function currencyDisplay(code, amount) {
     const sym = CURRENCY_SYMBOLS[code] || code + " ";
     return `${sym}${amount}`;
+}
+
+/**
+ * Check if an expense pushed a category over/near its budget, and send an alert.
+ */
+async function checkBudgetAlert(ctx, category, currency) {
+    try {
+        const budgets = await getBudgets();
+        const budget = budgets.get(category);
+        if (!budget) return; // no budget set for this category
+
+        const spend = await getMonthlySpendByCategory();
+        const spent = spend.get(category) || 0;
+        const pct = Math.round((spent / budget) * 100);
+
+        if (spent >= budget) {
+            await ctx.reply(
+                `🚨 *Budget Exceeded!*\n\n` +
+                `You've spent ${currencyDisplay(currency, spent)} on *${category}* this month.\n` +
+                `Budget: ${currencyDisplay(currency, budget)} (• ${pct}% used)`,
+                { parse_mode: "Markdown" }
+            );
+        } else if (pct >= 80) {
+            await ctx.reply(
+                `⚠️ *Budget Warning*\n\n` +
+                `You've spent ${currencyDisplay(currency, spent)} on *${category}* this month.\n` +
+                `Budget: ${currencyDisplay(currency, budget)} (• ${pct}% used)`,
+                { parse_mode: "Markdown" }
+            );
+        }
+    } catch (err) {
+        console.error("Budget alert check failed:", err);
+    }
+}
+
+/**
+ * Convert expense to INR if needed, and build the payload for appendExpense + display.
+ */
+async function buildExpensePayload(expense, rawTranscript) {
+    const expenseDate = expense.date || new Date().toISOString().split("T")[0];
+    let inrAmount = expense.amount;
+    let originalCurrency = "";
+    let originalAmount = null;
+    let conversionNote = "";
+
+    if (expense.currency && expense.currency !== "INR") {
+        const { inrAmount: converted, rate } = await convertToINR(
+            expense.amount, expense.currency, expenseDate
+        );
+        originalCurrency = expense.currency;
+        originalAmount = expense.amount;
+        inrAmount = converted;
+        conversionNote = `\n💱 _Converted: ${currencyDisplay(expense.currency, expense.amount)} → ₹${inrAmount} @ ${rate}_`;
+    }
+
+    const sheetData = {
+        date: expenseDate,
+        amount: inrAmount,
+        currency: "INR",
+        category: expense.category,
+        description: expense.description,
+        rawTranscript,
+        originalCurrency,
+        originalAmount,
+    };
+
+    return { sheetData, inrAmount, expenseDate, conversionNote };
 }
 
 // ── /start command ──────────────────────────────────────────────────
@@ -48,6 +116,7 @@ bot.command("help", async (ctx) => {
         `/week — This week's spending summary\n` +
         `/month — This month's spending summary\n` +
         `/undo — Delete the last logged expense\n` +
+        `/budget — Set monthly budgets per category\n` +
         `/categories — View, add, or remove categories\n` +
         `/help — This message`,
         { parse_mode: "Markdown" }
@@ -146,6 +215,73 @@ bot.command("categories", async (ctx) => {
     }
 });
 
+// ── /budget command ─────────────────────────────────────────────────
+bot.command("budget", async (ctx) => {
+    const args = ctx.match?.trim() || "";
+
+    try {
+        // /budget set Food 5000
+        if (args.toLowerCase().startsWith("set ")) {
+            const parts = args.slice(4).trim().split(/\s+/);
+            const amount = parseFloat(parts.pop());
+            const category = parts.join(" ");
+            if (!category || isNaN(amount) || amount <= 0) {
+                await ctx.reply("⚠️ Usage: `/budget set Food 5000`", { parse_mode: "Markdown" });
+                return;
+            }
+            await setBudget(category, amount);
+            await ctx.reply(`✅ Budget for *${category}* set to *${amount}*/month`, { parse_mode: "Markdown" });
+            return;
+        }
+
+        // /budget remove Food
+        if (args.toLowerCase().startsWith("remove ")) {
+            const category = args.slice(7).trim();
+            if (!category) {
+                await ctx.reply("⚠️ Usage: `/budget remove Food`", { parse_mode: "Markdown" });
+                return;
+            }
+            const removed = await removeBudget(category);
+            if (removed) {
+                await ctx.reply(`🗑 Budget for *${category}* removed.`, { parse_mode: "Markdown" });
+            } else {
+                await ctx.reply(`⚠️ No budget found for *${category}*.`, { parse_mode: "Markdown" });
+            }
+            return;
+        }
+
+        // /budget (list all)
+        const budgets = await getBudgets();
+        if (budgets.size === 0) {
+            await ctx.reply(
+                `💰 *No budgets set yet.*\n\n` +
+                `Set one with:\n\`/budget set Food 5000\``,
+                { parse_mode: "Markdown" }
+            );
+            return;
+        }
+
+        const spend = await getMonthlySpendByCategory();
+        let msg = `💰 *Monthly Budgets*\n\n`;
+
+        for (const [cat, budget] of budgets) {
+            const spent = spend.get(cat) || 0;
+            const pct = Math.round((spent / budget) * 100);
+            const bar = pct >= 100 ? "🟥" : pct >= 80 ? "🟨" : "🟩";
+            msg += `${bar} *${cat}:* ${spent} / ${budget} (${pct}%)\n`;
+        }
+
+        msg += `\n💡 *Manage:*\n` +
+            `\`/budget set Food 5000\`\n` +
+            `\`/budget remove Food\``;
+
+        await ctx.reply(msg, { parse_mode: "Markdown" });
+    } catch (err) {
+        console.error("Error managing budgets:", err);
+        await ctx.reply("❌ Failed to manage budgets. Please try again.");
+    }
+});
+
 // ── /week command ───────────────────────────────────────────────────
 bot.command("week", async (ctx) => {
     const msg = await ctx.reply("📊 Crunching this week's numbers...");
@@ -202,32 +338,28 @@ bot.on("message:voice", async (ctx) => {
         // 3. Extract expense data
         const expense = await extractExpense(transcript);
 
-        // 4. Log to Google Sheet
-        const expenseDate = expense.date || new Date().toISOString().split("T")[0];
-        await appendExpense({
-            date: expenseDate,
-            amount: expense.amount,
-            currency: expense.currency,
-            category: expense.category,
-            description: expense.description,
-            rawTranscript: transcript,
-        });
+        // 4. Convert to INR if needed & log to Google Sheet
+        const { sheetData, inrAmount, expenseDate, conversionNote } = await buildExpensePayload(expense, transcript);
+        await appendExpense(sheetData);
 
         // 5. Reply with confirmation
         await ctx.api.editMessageText(
             ctx.chat.id,
             processingMsg.message_id,
             `✅ *Expense Logged!*\n\n` +
-            `💰 *Amount:* ${currencyDisplay(expense.currency, expense.amount)}\n` +
+            `💰 *Amount:* ₹${inrAmount}\n` +
             `📂 *Category:* ${expense.category}\n` +
             `📝 *Description:* ${expense.description}\n` +
-            `🗓 *Date:* ${expenseDate}\n\n` +
+            `🗓 *Date:* ${expenseDate}${conversionNote}\n\n` +
             `🎙 _"${transcript}"_`,
             { parse_mode: "Markdown" }
         );
 
         // Cleanup temp file
         await unlink(filePath).catch(() => { });
+
+        // 6. Budget alert check
+        await checkBudgetAlert(ctx, expense.category, "INR");
     } catch (err) {
         console.error("Error processing voice note:", err);
         await ctx.api.editMessageText(
@@ -253,28 +385,24 @@ bot.on("message:photo", async (ctx) => {
         // Extract expense from receipt image
         const expense = await extractExpenseFromImage(imageUrl);
 
-        // Log to Google Sheet
-        const expenseDate = expense.date || new Date().toISOString().split("T")[0];
-        await appendExpense({
-            date: expenseDate,
-            amount: expense.amount,
-            currency: expense.currency,
-            category: expense.category,
-            description: expense.description,
-            rawTranscript: "[receipt photo]",
-        });
+        // Convert to INR if needed & log to Google Sheet
+        const { sheetData, inrAmount, expenseDate, conversionNote } = await buildExpensePayload(expense, "[receipt photo]");
+        await appendExpense(sheetData);
 
         // Reply with confirmation
         await ctx.api.editMessageText(
             ctx.chat.id,
             processingMsg.message_id,
             `✅ *Receipt Logged!*\n\n` +
-            `💰 *Amount:* ${currencyDisplay(expense.currency, expense.amount)}\n` +
+            `💰 *Amount:* ₹${inrAmount}\n` +
             `📂 *Category:* ${expense.category}\n` +
             `📝 *Description:* ${expense.description}\n` +
-            `🗓 *Date:* ${expenseDate}`,
+            `🗓 *Date:* ${expenseDate}${conversionNote}`,
             { parse_mode: "Markdown" }
         );
+
+        // Budget alert check
+        await checkBudgetAlert(ctx, expense.category, "INR");
     } catch (err) {
         console.error("Error processing receipt photo:", err);
         await ctx.api.editMessageText(
@@ -299,28 +427,24 @@ bot.on("message:text", async (ctx) => {
         // Extract expense data from the text
         const expense = await extractExpense(text);
 
-        // Log to Google Sheet
-        const expenseDate = expense.date || new Date().toISOString().split("T")[0];
-        await appendExpense({
-            date: expenseDate,
-            amount: expense.amount,
-            currency: expense.currency,
-            category: expense.category,
-            description: expense.description,
-            rawTranscript: text,
-        });
+        // Convert to INR if needed & log to Google Sheet
+        const { sheetData, inrAmount, expenseDate, conversionNote } = await buildExpensePayload(expense, text);
+        await appendExpense(sheetData);
 
         // Reply with confirmation
         await ctx.api.editMessageText(
             ctx.chat.id,
             processingMsg.message_id,
             `✅ *Expense Logged!*\n\n` +
-            `💰 *Amount:* ${currencyDisplay(expense.currency, expense.amount)}\n` +
+            `💰 *Amount:* ₹${inrAmount}\n` +
             `📂 *Category:* ${expense.category}\n` +
             `📝 *Description:* ${expense.description}\n` +
-            `🗓 *Date:* ${expenseDate}`,
+            `🗓 *Date:* ${expenseDate}${conversionNote}`,
             { parse_mode: "Markdown" }
         );
+
+        // Budget alert check
+        await checkBudgetAlert(ctx, expense.category, "INR");
     } catch (err) {
         console.error("Error processing text message:", err);
         await ctx.api.editMessageText(

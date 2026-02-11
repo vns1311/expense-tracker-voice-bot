@@ -11,6 +11,7 @@ const sheets = google.sheets({ version: "v4", auth });
 const SHEET_ID = config.googleSheetId;
 const SHEET_NAME = "Expenses"; // tab name inside the spreadsheet
 const CATEGORIES_SHEET_NAME = "Categories"; // tab for custom categories
+const BUDGETS_SHEET_NAME = "Budgets"; // tab for monthly budgets
 
 // ── Ensure header row exists ────────────────────────────────────────
 let headerChecked = false;
@@ -20,16 +21,16 @@ async function ensureHeaders() {
 
     const res = await sheets.spreadsheets.values.get({
         spreadsheetId: SHEET_ID,
-        range: `${SHEET_NAME}!A1:F1`,
+        range: `${SHEET_NAME}!A1:H1`,
     });
 
     if (!res.data.values || res.data.values.length === 0) {
         await sheets.spreadsheets.values.update({
             spreadsheetId: SHEET_ID,
-            range: `${SHEET_NAME}!A1:F1`,
+            range: `${SHEET_NAME}!A1:H1`,
             valueInputOption: "RAW",
             requestBody: {
-                values: [["Date", "Amount", "Currency", "Category", "Description", "Raw Transcript"]],
+                values: [["Date", "Amount (INR)", "Currency", "Category", "Description", "Raw Transcript", "Original Currency", "Original Amount"]],
             },
         });
         console.log("📊  Created header row in Google Sheet");
@@ -40,7 +41,7 @@ async function ensureHeaders() {
 
 // ── Append an expense row ───────────────────────────────────────────
 /**
- * @param {{ date: string, amount: number, currency: string, category: string, description: string, rawTranscript: string }} expense
+ * @param {{ date: string, amount: number, currency: string, category: string, description: string, rawTranscript: string, originalCurrency?: string, originalAmount?: number }} expense
  */
 export async function appendExpense(expense) {
     await ensureHeaders();
@@ -52,11 +53,13 @@ export async function appendExpense(expense) {
         expense.category,
         expense.description,
         expense.rawTranscript,
+        expense.originalCurrency || "",
+        expense.originalAmount || "",
     ];
 
     await sheets.spreadsheets.values.append({
         spreadsheetId: SHEET_ID,
-        range: `${SHEET_NAME}!A:F`,
+        range: `${SHEET_NAME}!A:H`,
         valueInputOption: "USER_ENTERED",
         insertDataOption: "INSERT_ROWS",
         requestBody: { values: [row] },
@@ -256,5 +259,148 @@ export async function removeCategory(name) {
         },
     });
     return true;
+}
+
+// ── Monthly Budgets ─────────────────────────────────────────────────
+async function ensureBudgetsTab() {
+    const meta = await sheets.spreadsheets.get({
+        spreadsheetId: SHEET_ID,
+        fields: "sheets.properties.title",
+    });
+    const exists = meta.data.sheets.some(
+        (s) => s.properties.title === BUDGETS_SHEET_NAME
+    );
+    if (!exists) {
+        await sheets.spreadsheets.batchUpdate({
+            spreadsheetId: SHEET_ID,
+            requestBody: {
+                requests: [{ addSheet: { properties: { title: BUDGETS_SHEET_NAME } } }],
+            },
+        });
+        await sheets.spreadsheets.values.update({
+            spreadsheetId: SHEET_ID,
+            range: `${BUDGETS_SHEET_NAME}!A1:B1`,
+            valueInputOption: "RAW",
+            requestBody: { values: [["Category", "Budget"]] },
+        });
+    }
+}
+
+/**
+ * Get all budgets.
+ * @returns {Promise<Map<string, number>>} category → budget amount
+ */
+export async function getBudgets() {
+    await ensureBudgetsTab();
+    const res = await sheets.spreadsheets.values.get({
+        spreadsheetId: SHEET_ID,
+        range: `${BUDGETS_SHEET_NAME}!A2:B`,
+    });
+    const map = new Map();
+    for (const row of res.data.values || []) {
+        if (row[0] && row[1]) map.set(row[0], parseFloat(row[1]));
+    }
+    return map;
+}
+
+/**
+ * Set (or update) a budget for a category.
+ * @param {string} category
+ * @param {number} amount
+ */
+export async function setBudget(category, amount) {
+    await ensureBudgetsTab();
+    const res = await sheets.spreadsheets.values.get({
+        spreadsheetId: SHEET_ID,
+        range: `${BUDGETS_SHEET_NAME}!A2:B`,
+    });
+    const rows = res.data.values || [];
+    const idx = rows.findIndex(
+        (r) => r[0] && r[0].toLowerCase() === category.toLowerCase()
+    );
+
+    if (idx >= 0) {
+        // Update existing
+        const rowNum = idx + 2;
+        await sheets.spreadsheets.values.update({
+            spreadsheetId: SHEET_ID,
+            range: `${BUDGETS_SHEET_NAME}!B${rowNum}`,
+            valueInputOption: "USER_ENTERED",
+            requestBody: { values: [[amount]] },
+        });
+    } else {
+        // Append new
+        await sheets.spreadsheets.values.append({
+            spreadsheetId: SHEET_ID,
+            range: `${BUDGETS_SHEET_NAME}!A:B`,
+            valueInputOption: "USER_ENTERED",
+            insertDataOption: "INSERT_ROWS",
+            requestBody: { values: [[category, amount]] },
+        });
+    }
+}
+
+/**
+ * Remove a budget for a category.
+ * @param {string} category
+ * @returns {Promise<boolean>}
+ */
+export async function removeBudget(category) {
+    await ensureBudgetsTab();
+    const res = await sheets.spreadsheets.values.get({
+        spreadsheetId: SHEET_ID,
+        range: `${BUDGETS_SHEET_NAME}!A2:B`,
+    });
+    const rows = res.data.values || [];
+    const idx = rows.findIndex(
+        (r) => r[0] && r[0].toLowerCase() === category.toLowerCase()
+    );
+    if (idx === -1) return false;
+
+    const rowIndex = idx + 2;
+    const meta = await sheets.spreadsheets.get({
+        spreadsheetId: SHEET_ID,
+        fields: "sheets.properties",
+    });
+    const tab = meta.data.sheets.find(
+        (s) => s.properties.title === BUDGETS_SHEET_NAME
+    );
+
+    await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: SHEET_ID,
+        requestBody: {
+            requests: [{
+                deleteDimension: {
+                    range: {
+                        sheetId: tab.properties.sheetId,
+                        dimension: "ROWS",
+                        startIndex: rowIndex - 1,
+                        endIndex: rowIndex,
+                    },
+                },
+            }],
+        },
+    });
+    return true;
+}
+
+/**
+ * Get total spend for the current month grouped by category.
+ * @returns {Promise<Map<string, number>>}
+ */
+export async function getMonthlySpendByCategory() {
+    const expenses = await getExpenses();
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = now.getMonth(); // 0-indexed
+
+    const map = new Map();
+    for (const e of expenses) {
+        const d = new Date(e.date);
+        if (d.getFullYear() === year && d.getMonth() === month) {
+            map.set(e.category, (map.get(e.category) || 0) + e.amount);
+        }
+    }
+    return map;
 }
 
