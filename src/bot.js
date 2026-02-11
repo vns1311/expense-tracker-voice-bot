@@ -1,4 +1,4 @@
-import { Bot } from "grammy";
+import { Bot, InputFile } from "grammy";
 import { writeFile, unlink } from "fs/promises";
 import config from "./config.js";
 import { transcribeVoice } from "./transcribe.js";
@@ -6,6 +6,7 @@ import { extractExpense, extractExpenseFromImage } from "./extract.js";
 import { appendExpense, deleteLastExpense, getCategories, addCategory, removeCategory, getBudgets, setBudget, removeBudget, getMonthlySpendByCategory } from "./sheets.js";
 import { buildSummary } from "./summary.js";
 import { convertToINR } from "./currency.js";
+import { generatePieChart } from "./chart.js";
 
 const bot = new Bot(config.telegramBotToken);
 
@@ -115,6 +116,7 @@ bot.command("help", async (ctx) => {
         `/start — Welcome message\n` +
         `/week — This week's spending summary\n` +
         `/month — This month's spending summary\n` +
+        `/chart — Pie chart of your spending\n` +
         `/undo — Delete the last logged expense\n` +
         `/budget — Set monthly budgets per category\n` +
         `/categories — View, add, or remove categories\n` +
@@ -314,6 +316,74 @@ bot.command("month", async (ctx) => {
             ctx.chat.id,
             msg.message_id,
             "❌ Failed to generate summary. Please try again."
+        );
+    }
+});
+
+// ── /chart command ──────────────────────────────────────────────────
+bot.command("chart", async (ctx) => {
+    const period = (ctx.match?.trim() || "month").toLowerCase();
+    if (!["week", "month"].includes(period)) {
+        await ctx.reply("⚠️ Usage: `/chart` or `/chart week`", { parse_mode: "Markdown" });
+        return;
+    }
+
+    const msg = await ctx.reply(`📊 Generating ${period}ly chart...`);
+
+    try {
+        const { getExpenses } = await import("./sheets.js");
+        const expenses = await getExpenses();
+        const now = new Date();
+
+        // Filter expenses for the period
+        const filtered = expenses.filter((e) => {
+            const d = new Date(e.date);
+            if (period === "week") {
+                const dayOfWeek = now.getDay();
+                const monday = new Date(now);
+                monday.setDate(now.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
+                monday.setHours(0, 0, 0, 0);
+                return d >= monday;
+            } else {
+                return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
+            }
+        });
+
+        if (filtered.length === 0) {
+            await ctx.api.editMessageText(
+                ctx.chat.id, msg.message_id,
+                `📭 No expenses this ${period} to chart.`
+            );
+            return;
+        }
+
+        // Aggregate by category
+        const spend = new Map();
+        let total = 0;
+        for (const e of filtered) {
+            spend.set(e.category, (spend.get(e.category) || 0) + e.amount);
+            total += e.amount;
+        }
+
+        const title = period === "week"
+            ? `This Week's Spending — ₹${total.toLocaleString("en-IN")}`
+            : `This Month's Spending — ₹${total.toLocaleString("en-IN")}`;
+
+        const chartBuffer = await generatePieChart(spend, title);
+
+        // Delete the "Generating..." message
+        await ctx.api.deleteMessage(ctx.chat.id, msg.message_id).catch(() => { });
+
+        // Send chart as photo
+        await ctx.replyWithPhoto(new InputFile(chartBuffer, "chart.png"), {
+            caption: `📊 *${period === "week" ? "Weekly" : "Monthly"} Spending Chart*\n\nTotal: ₹${total.toLocaleString("en-IN")} across ${spend.size} categories`,
+            parse_mode: "Markdown",
+        });
+    } catch (err) {
+        console.error("Error generating chart:", err);
+        await ctx.api.editMessageText(
+            ctx.chat.id, msg.message_id,
+            "❌ Failed to generate chart. Please try again."
         );
     }
 });
