@@ -1,13 +1,19 @@
-# ── Fly.io Configuration ─────────────────────────────────────────────
-# Docs: https://fly.io/docs/reference/configuration/
+# fly.toml app configuration file generated for voice-expense-manager on 2026-03-13T21:05:32+05:30
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-app = "voice-expense-manager"
-primary_region = "maa"           # Chennai, India — closest to you
+app = 'voice-expense-manager'
+primary_region = 'bom'
 
 [build]
 
-# Background worker — no HTTP services needed
 [processes]
-  worker = "node src/index.js"
+  worker = 'node src/index.js'
 
-# No [[services]] or [http_service] = pure background worker (no ports exposed)
+# No [http_service] — this is a pure background worker (Telegram bot)
+
+[[vm]]
+  memory = '256mb'
+  cpus = 1
+  processes = ['worker']
