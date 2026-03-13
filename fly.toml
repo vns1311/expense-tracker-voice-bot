@@ -1,0 +1,13 @@
+# ── Fly.io Configuration ─────────────────────────────────────────────
+# Docs: https://fly.io/docs/reference/configuration/
+
+app = "voice-expense-manager"
+primary_region = "maa"           # Chennai, India — closest to you
+
+[build]
+
+# Background worker — no HTTP services needed
+[processes]
+  worker = "node src/index.js"
+
+# No [[services]] or [http_service] = pure background worker (no ports exposed)
