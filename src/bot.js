@@ -3,7 +3,7 @@ import { writeFile, unlink } from "fs/promises";
 import config from "./config.js";
 import { transcribeVoice } from "./transcribe.js";
 import { extractExpense, extractExpenseFromImage, needsClarification, clarifyExpense } from "./extract.js";
-import { appendExpense, deleteLastExpense, getCategories, addCategory, removeCategory, getBudgets, setBudget, removeBudget, getMonthlySpendByCategory } from "./sheets.js";
+import { appendExpense, deleteLastExpense, getCategories, addCategory, removeCategory, getBudgets, setBudget, removeBudget, getMonthlySpendByCategory, getExpenses } from "./sheets.js";
 import { buildSummary } from "./summary.js";
 import { convertToINR } from "./currency.js";
 import { generatePieChart } from "./chart.js";
@@ -154,6 +154,9 @@ bot.command("help", async (ctx) => {
         `/week — This week's spending summary\n` +
         `/month — This month's spending summary\n` +
         `/chart — Pie chart of your spending\n` +
+        `/compare — Month-over-month comparison\n` +
+        `/top — Your biggest expenses\n` +
+        `/insights — AI spending analysis\n` +
         `/undo — Delete the last logged expense\n` +
         `/budget — Set monthly budgets per category\n` +
         `/categories — View, add, or remove categories\n` +
@@ -422,6 +425,180 @@ bot.command("chart", async (ctx) => {
             ctx.chat.id, msg.message_id,
             "❌ Failed to generate chart. Please try again."
         );
+    }
+});
+
+// ── /compare command (month-over-month) ────────────────────────────
+bot.command("compare", async (ctx) => {
+    const msg = await ctx.reply("📊 Comparing months...");
+
+    try {
+        const expenses = await getExpenses();
+        const now = new Date();
+        const thisMonth = now.getMonth();
+        const thisYear = now.getFullYear();
+        const lastMonth = thisMonth === 0 ? 11 : thisMonth - 1;
+        const lastMonthYear = thisMonth === 0 ? thisYear - 1 : thisYear;
+
+        const thisMonthSpend = new Map();
+        const lastMonthSpend = new Map();
+        let thisTotal = 0, lastTotal = 0;
+
+        for (const e of expenses) {
+            const d = new Date(e.date);
+            if (d.getFullYear() === thisYear && d.getMonth() === thisMonth) {
+                thisMonthSpend.set(e.category, (thisMonthSpend.get(e.category) || 0) + e.amount);
+                thisTotal += e.amount;
+            } else if (d.getFullYear() === lastMonthYear && d.getMonth() === lastMonth) {
+                lastMonthSpend.set(e.category, (lastMonthSpend.get(e.category) || 0) + e.amount);
+                lastTotal += e.amount;
+            }
+        }
+
+        const allCats = new Set([...thisMonthSpend.keys(), ...lastMonthSpend.keys()]);
+
+        const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        let text = `📈 *${monthNames[lastMonth]} vs ${monthNames[thisMonth]} Comparison*\n\n`;
+
+        const rows = [];
+        for (const cat of allCats) {
+            const prev = lastMonthSpend.get(cat) || 0;
+            const curr = thisMonthSpend.get(cat) || 0;
+            const diff = curr - prev;
+            const pct = prev > 0 ? Math.round(((curr - prev) / prev) * 100) : (curr > 0 ? 100 : 0);
+            const arrow = diff > 0 ? "📈" : diff < 0 ? "📉" : "➡️";
+            const sign = diff > 0 ? "+" : "";
+            rows.push({ cat, prev, curr, diff, pct, arrow, sign });
+        }
+
+        // Sort by absolute difference
+        rows.sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff));
+
+        for (const r of rows) {
+            text += `${r.arrow} *${r.cat}:* ₹${r.curr.toLocaleString("en-IN")} vs ₹${r.prev.toLocaleString("en-IN")} (${r.sign}${r.pct}%)\n`;
+        }
+
+        const totalDiff = thisTotal - lastTotal;
+        const totalPct = lastTotal > 0 ? Math.round(((thisTotal - lastTotal) / lastTotal) * 100) : 0;
+        const totalArrow = totalDiff > 0 ? "📈" : totalDiff < 0 ? "📉" : "➡️";
+        const totalSign = totalDiff > 0 ? "+" : "";
+
+        text += `\n${totalArrow} *Total:* ₹${thisTotal.toLocaleString("en-IN")} vs ₹${lastTotal.toLocaleString("en-IN")} (${totalSign}${totalPct}%)`;
+
+        await ctx.api.editMessageText(ctx.chat.id, msg.message_id, text, { parse_mode: "Markdown" });
+    } catch (err) {
+        console.error("Error comparing months:", err);
+        await ctx.api.editMessageText(ctx.chat.id, msg.message_id, "❌ Failed to compare. Please try again.");
+    }
+});
+
+// ── /top command (biggest expenses) ───────────────────────────────
+bot.command("top", async (ctx) => {
+    const n = parseInt(ctx.match?.trim()) || 5;
+    const msg = await ctx.reply(`🏆 Finding your top ${n} expenses...`);
+
+    try {
+        const expenses = await getExpenses();
+        const now = new Date();
+
+        // Filter to current month
+        const monthly = expenses.filter((e) => {
+            const d = new Date(e.date);
+            return d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth();
+        });
+
+        if (monthly.length === 0) {
+            await ctx.api.editMessageText(ctx.chat.id, msg.message_id, "📭 No expenses this month yet.");
+            return;
+        }
+
+        // Sort by amount descending
+        const sorted = [...monthly].sort((a, b) => b.amount - a.amount);
+        const top = sorted.slice(0, Math.min(n, sorted.length));
+
+        let text = `🏆 *Top ${top.length} Expenses This Month*\n\n`;
+        top.forEach((e, i) => {
+            const medal = i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `${i + 1}.`;
+            text += `${medal} *₹${e.amount.toLocaleString("en-IN")}* — ${e.description} _(${e.category}, ${e.date})_\n`;
+        });
+
+        const total = monthly.reduce((s, e) => s + e.amount, 0);
+        const topTotal = top.reduce((s, e) => s + e.amount, 0);
+        const pct = Math.round((topTotal / total) * 100);
+        text += `\n💰 These top ${top.length} = ₹${topTotal.toLocaleString("en-IN")} (${pct}% of total ₹${total.toLocaleString("en-IN")})`;
+
+        await ctx.api.editMessageText(ctx.chat.id, msg.message_id, text, { parse_mode: "Markdown" });
+    } catch (err) {
+        console.error("Error getting top expenses:", err);
+        await ctx.api.editMessageText(ctx.chat.id, msg.message_id, "❌ Failed to get top expenses.");
+    }
+});
+
+// ── /insights command (AI-generated spending analysis) ─────────────
+bot.command("insights", async (ctx) => {
+    const msg = await ctx.reply("🧠 Analyzing your spending patterns...");
+
+    try {
+        const expenses = await getExpenses();
+        const now = new Date();
+        const thisMonth = now.getMonth();
+        const thisYear = now.getFullYear();
+
+        const monthly = expenses.filter((e) => {
+            const d = new Date(e.date);
+            return d.getFullYear() === thisYear && d.getMonth() === thisMonth;
+        });
+
+        if (monthly.length < 3) {
+            await ctx.api.editMessageText(
+                ctx.chat.id, msg.message_id,
+                "📭 Need at least 3 expenses this month to generate insights."
+            );
+            return;
+        }
+
+        // Build a summary of spending for GPT
+        const byCategory = new Map();
+        let total = 0;
+        for (const e of monthly) {
+            byCategory.set(e.category, (byCategory.get(e.category) || 0) + e.amount);
+            total += e.amount;
+        }
+
+        const spendSummary = [...byCategory.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .map(([cat, amt]) => `${cat}: ₹${amt} (${Math.round((amt / total) * 100)}%)`)
+            .join("\n");
+
+        const { default: OpenAI } = await import("openai");
+        const { default: cfg } = await import("./config.js");
+        const openai = new OpenAI({ apiKey: cfg.openaiApiKey });
+
+        const response = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [
+                {
+                    role: "system",
+                    content: `You are a personal finance advisor. Given the user's monthly spending breakdown, provide 3-4 short, actionable insights. Be specific with numbers. Use emoji. Keep it under 200 words. Format in Markdown with bold headers.`,
+                },
+                {
+                    role: "user",
+                    content: `My spending this month (${monthly.length} transactions, total ₹${total}):\n\n${spendSummary}`,
+                },
+            ],
+            temperature: 0.7,
+            max_tokens: 400,
+        });
+
+        const insights = response.choices[0].message.content;
+        await ctx.api.editMessageText(
+            ctx.chat.id, msg.message_id,
+            `🧠 *AI Spending Insights*\n\n${insights}`,
+            { parse_mode: "Markdown" }
+        );
+    } catch (err) {
+        console.error("Error generating insights:", err);
+        await ctx.api.editMessageText(ctx.chat.id, msg.message_id, "❌ Failed to generate insights.");
     }
 });
 

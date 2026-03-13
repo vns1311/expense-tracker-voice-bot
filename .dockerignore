@@ -1,0 +1,9 @@
+node_modules
+.env
+.env.example
+credentials.json
+*.ogg
+.git
+.gitignore
+README.md
+DEPLOYMENT.md
